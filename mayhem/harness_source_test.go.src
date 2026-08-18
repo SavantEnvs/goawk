@@ -1,0 +1,69 @@
+//go:build go1.18
+
+// mayhem harness — fuzz the AWK PROGRAM surface: lexer, parser, resolver and
+// interpreter over an UNTRUSTED source program (upstream's FuzzSource surface,
+// interp/fuzz_test.go).
+//
+// Upstream's own FuzzSource is already file-I/O free (its seed corpus comes
+// from an in-memory Go slice, interpTests, not a file read) and already bounds
+// execution via interp.Config{NoExec, NoFileWrites, NoFileReads} plus a
+// context.WithTimeout — so an AWK program like `while(1);` cannot hang the
+// fuzzer or touch the filesystem/network. This harness mirrors that shape
+// exactly rather than reusing upstream's FuzzSource function directly, so it
+// stays independent of any future edit to fuzz_test.go and takes its bytes
+// straight from the fuzzer ([]byte, no []byte->string round trip needed since
+// parser.ParseProgram already takes []byte).
+//
+// This file is committed as `.go.src` (a non-.go name) so it is never picked
+// up as an ordinary package file by `go build`/`go test`; mayhem/build.sh
+// copies it into its OWN fresh package directory (mayhem-build/fuzz_source/)
+// as a real _test.go only for the go-118-fuzz-build step.
+//
+// WHY A FRESH DIRECTORY, NOT interp/: upstream's interp/ package directory
+// mixes internal-test files (package interp — e.g. csvreader_test.go) and
+// external-test files (package interp_test — e.g. fuzz_test.go), which is
+// completely normal for `go test` but go-118-fuzz-build's package loader
+// chokes on it ("found packages interp ... and interp_test ... in
+// /mayhem/interp") regardless of which Fuzz function is targeted — even
+// upstream's OWN unmodified FuzzSource fails to build that way. Building
+// from a brand-new directory containing only this one file sidesteps the
+// conflict entirely; it still only touches the public interp/parser API.
+
+package fuzzsource
+
+import (
+	"context"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/benhoyt/goawk/interp"
+	"github.com/benhoyt/goawk/parser"
+)
+
+func FuzzMayhemSource(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		prog, err := parser.ParseProgram(data, nil)
+		if err != nil {
+			// Malformed/invalid AWK source is an expected outcome, not a finding.
+			return
+		}
+		interpreter, err := interp.New(prog)
+		if err != nil {
+			return
+		}
+		config := &interp.Config{
+			Stdin:        strings.NewReader("foo bar\nbazz\n"),
+			Output:       io.Discard,
+			Error:        io.Discard,
+			NoExec:       true,
+			NoFileWrites: true,
+			NoFileReads:  true,
+			Environ:      []string{},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_, _ = interpreter.ExecuteContext(ctx, config)
+	})
+}

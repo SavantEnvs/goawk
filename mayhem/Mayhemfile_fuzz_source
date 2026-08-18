@@ -1,0 +1,8 @@
+project: savantenvs/goawk
+target: fuzz_source
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_source/testsuite
+cmds:
+  - cmd: /mayhem/fuzz_source
+    libfuzzer: true

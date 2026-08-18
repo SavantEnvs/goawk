@@ -1,0 +1,68 @@
+//go:build go1.18
+
+// mayhem harness — fuzz the INPUT DATA surface: run a FIXED, known-good AWK
+// program over untrusted stdin bytes (upstream's FuzzInput surface,
+// interp/fuzz_test.go), exercising record/field splitting and number parsing
+// rather than the parser.
+//
+// The fixed program is upstream's own `{ print $0, $3, $1, $10 }` — it reads
+// $0, several numbered fields (forcing field splitting up to a gap past NF)
+// and prints them, so both the splitter and the field->string/number coercion
+// paths are exercised on every input.
+//
+// Bounded the same way as the source harness: interp.Config{NoExec,
+// NoFileWrites, NoFileReads} plus a context timeout, so a pathological RS/FS
+// or a program trying to loop forever cannot hang the fuzzer or touch the
+// filesystem. No file I/O anywhere — bytes come only from the fuzzer; starter
+// seeds are supplied by Mayhem via the Mayhemfile `testsuite:` directive.
+//
+// Committed as `.go.src` so it's never compiled as an ordinary package file;
+// mayhem/build.sh copies it into its OWN fresh package directory
+// (mayhem-build/fuzz_input/) as a real _test.go only for the
+// go-118-fuzz-build step — see harness_source_test.go.src for why this can't
+// live in interp/ itself (go-118-fuzz-build cannot load a directory that
+// mixes internal- and external-test packages, which interp/ does upstream).
+
+package fuzzinput
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/benhoyt/goawk/interp"
+	"github.com/benhoyt/goawk/parser"
+)
+
+func FuzzMayhemInput(f *testing.F) {
+	// Parsed once per iteration (the whole function body re-runs per input
+	// under go-118-fuzz-build) but this is a fixed literal that always parses
+	// successfully — no file I/O, no data-dependent failure.
+	prog, err := parser.ParseProgram([]byte(`{ print $0, $3, $1, $10 }`), nil)
+	if err != nil {
+		return
+	}
+	interpreter, err := interp.New(prog)
+	if err != nil {
+		return
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		interpreter.ResetVars()
+		config := &interp.Config{
+			Stdin:        bytes.NewReader(data),
+			Output:       io.Discard,
+			Error:        io.Discard,
+			Vars:         []string{"FS", " ", "RS", "\n"},
+			NoExec:       true,
+			NoFileWrites: true,
+			NoFileReads:  true,
+			Environ:      []string{},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_, _ = interpreter.ExecuteContext(ctx, config)
+	})
+}
